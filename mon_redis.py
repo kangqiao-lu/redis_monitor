@@ -1,7 +1,10 @@
 #!/usr/bin/python
 #coding=utf-8
 #redis  monitor by lujiajun
-import MySQLdb
+#我的第一个Python脚本,里面很多写的不对,比如没有用到redis的长连接,没去一次数据都是新建一个连接,浪费资源.
+#还是窜行的区监控每一个redis实例,可以改成Python的多线程或者多进程.
+#需要改进和学习的地方太多
+#刚开始貌似没弄明白is 和 == 的区别.
 import time
 import socket
 import sys
@@ -11,27 +14,12 @@ import logging
 import os
 import string
 import redis
+import MySQLHandler
 
 """ 连接mysql，获取数据"""
-def get_mysql_data(sql):
-    try:
-        con_db =  MySQLdb.connect(host='yz-log-ku-m00',port=3306,user='dba_monitor',passwd='ganjicac',db='dba_stats')
-        cursor = con_db.cursor()
-        cursor.execute(sql)
-        sql_data = cursor.fetchall()
-    except:
-        sql_data = 0
-    finally:
-        return sql_data
-
-def execute_sql(sql):
-    try:
-        con_db = MySQLdb.connect(host='yz-log-ku-m00',port=3306,user='dba_monitor',passwd='ganjicac',db='dba_stats')
-        con_db.autocommit(1)
-        cursor= con_db.cursor()
-        cursor.execute(sql)
-    except:
-        return 0
+dbhost = ""
+dbport = ""
+db = MySQLHandler.MySQLHandler(dbhost,dbport)
 
 """ ping redis"""
 def conn_redis(h,p):
@@ -42,76 +30,12 @@ def conn_redis(h,p):
     except:
         return 0
 
-def send_sms(msg, phones, sms_gateway='http://sms.dns.ganji.com:20000/WebGate/ShortMsg.aspx'):
-    '''
-        send short message to phones, no return value(empty string anyway)
-    '''
-    res = True
-    unique_id = 'Tan'
-    query_dict = {'opt': 'send',
-                  'uniqueId': unique_id,
-                  'serviceId': 'bf33195b-2a42-a847-b8d8-351a233a2c87',
-                  'phones': phones,
-                  'content': msg}
-                  #'content': msg.encode('utf8')}
-    try:
-        query = urllib.urlencode(query_dict)
-        url = '%s?%s' % (sms_gateway, query)
-        fh = urllib.urlopen(url)
-        status = fh.read()
-        if status.strip() != '1':
-            # print "send_sms failed:", status
-            print "send_sms failed: returned status != 1"
-    except Exception as ex:
-        print 'send sms failed:', ex
-        res = False
-    return res
-
-
-def send_mail_http(receiver, body, title=None,
-                   sid='dba-alert', email_gateway='http://edmpost.dns.ganji.com:8080/emailservice/postdata'
-                   ):
-    res = True
-    if title is None:
-        title = 'warning from dba python'
-        title = title +  datetime.datetime.now().strftime(u"%m-%d %H:%M")
-    if not body:
-        print('empty body, no email sent')
-        return False
-    post_data = {'data':
-                 "{'Sid': '%s', 'Mail': '%s', 'Type': '1', 'Subject': '%s'}"
-                 % (sid, receiver, title),
-                 'mailbody': '%s' % body}
-                 #% (sid, receiver, title.encode('utf-8')),
-                 #'mailbody': '%s' % body.encode('utf-8')}
-    try:
-        fh = urllib.urlopen(email_gateway, data=urllib.urlencode(post_data))
-        result = fh.readlines()
-        if result != ['result=1']:
-            print(u'send failed:%s' % result)
-            res = False
-        else:
-            print(u'send ok:%s' % result)
-    except Exception as ex:
-        print (u'send fail:', ex)
-        res = False
-    return res    
-
 """ send sms according class"""
 def send_sms_class(mon_class,msg):
-    get_phones_sql = "select phones from dba_stats.redis_mon_phones where class='%s'" % mon_class
-    phones = get_mysql_data(get_phones_sql)[0][0]
-    if phones is ():
-        phones = '13381109027,15910707764,13811018735'
-    send_sms(msg,phones)
-
+	pass
 """ send mail according class"""
 def send_mail_class(mon_class,msg):
-    get_mail_sql = "select emails from dba_stats.redis_mon_phones where class='%s'" % mon_class
-    mails = get_mysql_data(get_mail_sql)[0][0]
-    if mails is ():
-        mails = 'dba.mon@ganji.com'
-    send_mail_http(mails,msg,msg)
+	pass
 
 
 def get_redis_mem(h,p):
@@ -124,7 +48,7 @@ def get_redis_mem(h,p):
 
 def compare_mem(id):
     sql = "select host,port,class,usefor,is_master,mem_limit,mem_status from dba_stats.redis_conf where id=%d" % id
-    alldata = get_mysql_data(sql)
+    alldata = db.get_mysql_data(sql)
     if alldata == 0:
         print 'Connect mysql has some problem......'
         exit(0)
@@ -141,12 +65,12 @@ def compare_mem(id):
         redis_class = data[2]
         if mem_status is not 1:
             update_sql = "update dba_stats.redis_conf set mem_status=1 where id=%d" % id
-            execute_sql(update_sql)
+            db.execute_sql(update_sql)
     else:
         if mem_status <= 3:
             now_mem_status = mem_status + 1
             update_sql = "update dba_stats.redis_conf set mem_status=%d where id=%d" % (now_mem_status,id)
-            execute_sql(update_sql)
+            db.execute_sql(update_sql)
             time_format = '%Y-%m-%d %X'
             now_date = time.strftime(time_format, time.localtime())
             usefor = data[3]
@@ -186,14 +110,14 @@ def check_slave_status(h,p):
 
 def start_mon(id,mon_type_time):
     sql = "select UNIX_TIMESTAMP(%s) from dba_stats.redis_conf where id=%s" % (mon_type_time,id)
-    start_time = int(get_mysql_data(sql)[0][0])
-    now_time =  int(get_mysql_data("select UNIX_TIMESTAMP(now())")[0][0])
+    start_time = int(db.get_mysql_data(sql)[0][0])
+    now_time =  int(db.get_mysql_data("select UNIX_TIMESTAMP(now())")[0][0])
     if mon_type_time == 'two_starttime':
         update_sql = "update dba_stats.redis_conf set is_mon=1,mon_two=1,mon_ten=1 where id=%s" % id
     elif mon_type_time == 'mem_starttime':
         update_sql = "update dba_stats.redis_conf set mon_mem=1 where id=%s" % id
     if now_time >= start_time:
-        execute_sql(update_sql)       
+        db.execute_sql(update_sql)       
         
 
 
